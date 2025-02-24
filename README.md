@@ -4,6 +4,8 @@
 
 *Created by Ian Doherty, January 2025 - February 2025*
 
+[Description goes here]
+
 ## Installation
 1. If you haven't already, install PureData [here](https://puredata.info/).
 2. Clone this repo using `git clone` on a command line or download the source code manually.
