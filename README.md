@@ -17,5 +17,6 @@
 ## Credits & Libraries Used
 * [PureData](https://puredata.info/): Everything!
 * [FFTW3](https://github.com/FFTW/fftw3): DFT generation
+* [convolve_tilde](https://github.com/wbrent/convolve_tilde): Makefile design, FFTW3 usage, installation instructions
 * [pure-data/pd-lib-builder](https://github.com/pure-data/pd-lib-builder): Makefile generation
 * [pure-data/externals-howto](https://github.com/pure-data/externals-howto?tab=readme-ov-file#atom-string): Helpful guide used during the creation of this external
