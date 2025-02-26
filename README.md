@@ -4,7 +4,16 @@
 
 *Created by Ian Doherty, January 2025 - February 2025*
 
-[Description goes here]
+This Pure Data external convolves an input source signal with a preloaded impulse response file in real-time. The convolution is *not partitioned*: the delay in the output signal is thus a direct result of the length of the impulse response. Fast convolution (point-wise multiplication of FFTs) is used to minimize computational cost.
+
+This external was created as part of my senior capstone project at the University of Illinois.
+
+Potential improvements for future iterations of this external:
+* Use partitioning to reduce IR delay.
+* Use a more sophisticated vector multiplication algorithm to speed up the convolution step. This could consist of SIMD and/or alignment tricks in C.
+* Investigate if FFTW plans can be saved and reused in the object proper.
+
+See below for installation instructions. For usage, refer to `converb~-help.pd`. 
 
 ## Installation
 1. If you haven't already, install PureData [here](https://puredata.info/).
@@ -21,4 +30,5 @@
 * [FFTW3](https://github.com/FFTW/fftw3): DFT generation
 * [convolve_tilde](https://github.com/wbrent/convolve_tilde): Makefile design, FFTW3 usage, installation instructions
 * [pure-data/pd-lib-builder](https://github.com/pure-data/pd-lib-builder): Makefile generation
+* [bed~ by Eric Lyon](https://www.amazon.com/Designing-Audio-Objects-Max-MSP/dp/B009LLXIVC): Handling garrays in the Pd external lib
 * [pure-data/externals-howto](https://github.com/pure-data/externals-howto?tab=readme-ov-file#atom-string): Helpful guide used during the creation of this external
