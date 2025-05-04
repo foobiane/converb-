@@ -1,3 +1,4 @@
+#include <complex.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,8 +47,12 @@ void converb_load(t_converb* x, t_symbol* s);
 void converb_dsp(t_converb* x, t_signal** sp);
 t_int* converb_perform(t_int* w);
 void converb_convolve(t_converb* x);
+
+// Helper Functions
+float* generate_hann_window(int n);
 void normalize(float* x, int size);
-void complex_multiply(float c1[2], float c2[2]);
+
+static float* hann_window = NULL;
 
 ///////////////////////////////////////////////////////////////////////////////
 // PD FUNCTIONALITY
@@ -98,8 +103,6 @@ void converb_free(t_converb* x) {
     if (x->convolution) free(x->convolution);
     if (x->input_dft) fftwf_free(x->input_dft);
     if (x->ir_dft) fftwf_free(x->input_dft);
-
-    // More?
 }
 
 void converb_load(t_converb* x, t_symbol* s) {
@@ -129,6 +132,12 @@ void converb_load(t_converb* x, t_symbol* s) {
 
     // Initializing
     x->data_size = ir_size;
+
+    if (hann_window) free(hann_window);
+    hann_window = generate_hann_window(ir_size);
+
+    for (int i = 0; i < ir_size; i++)
+        ir[i] *= hann_window[i];
 
     if (x->input_buffer) free(x->input_buffer);
     x->input_buffer = calloc(x->data_size, sizeof(float));
@@ -201,6 +210,10 @@ t_int* converb_perform(t_int* w) {
 }
 
 void converb_convolve(t_converb* x) {
+    // First, window the input
+    for (int i = 0; i < x->data_size; i++)
+        x->input_buffer[i] *= hann_window[i];
+
     // Taking DFT of input; if no input DFT exists yet, make space
     if (!x->input_dft)
         x->input_dft = fftwf_alloc_complex(x->data_size);
@@ -213,9 +226,9 @@ void converb_convolve(t_converb* x) {
     // Point-wise multiplication of IR and input DFTs
     // Note that the input DFT stores the results of this multiplication
     // A potential optimization could be the use of SIMD intrinsics to shave off some factors of n, but I have no clue how to do that!
-    for (int i = 0; i < x->data_size / 2 + 1; i++)
-        complex_multiply(x->input_dft[i], x->ir_dft[i]);
-
+    for (int i = 1; i < x->data_size / 2 + 1; i++)
+        x->input_dft[i] *= x->ir_dft[i];
+        
     // Taking inverse DFT of the convolution; if no convolution has been done yet, make space
     if (!x->convolution)
         x->convolution = calloc(x->data_size, sizeof(float));
@@ -226,7 +239,20 @@ void converb_convolve(t_converb* x) {
     fftwf_execute(p2);
     fftwf_destroy_plan(p2);
 
+    for (int i = 0; i < x->data_size; i++)
+        x->convolution[i] *= hann_window[i];
+
     normalize(x->convolution, x->data_size);
+}
+
+// Generates a Hann window for windowing our samples.
+float* generate_hann_window(int n) {
+    float* result = calloc(n, sizeof(float));
+
+    for (int i = 0; i < n; i++)
+        result[i] = sqrt(pow(sin(M_PI * i / n), 2));
+
+    return result;
 }
 
 void normalize(float* x, int size) {
@@ -239,11 +265,6 @@ void normalize(float* x, int size) {
 
     if (max != 0.0) {
         for (int i = 0; i < size; i++)
-            x[i] /= max;
+            x[i] /= (max * 2);
     }
-}
-
-void complex_multiply(float c1[2], float c2[2]) {
-    c1[0] = (c1[0] * c2[0]) - (c1[1] * c2[1]);
-    c1[1] = (c1[0] * c2[1]) + (c1[1] * c2[0]);
 }
