@@ -7,6 +7,8 @@
 #include "m_pd.h"
 #include "fftw3.h"
 
+#define HOP_FAC 0.5
+
 /*
  * A note on block size
  *
@@ -22,15 +24,18 @@ typedef struct _converb {
     t_object obj;
 
     float* input_buffer;
-    float* convolution;
-    fftwf_complex* input_dft;
     fftwf_complex* ir_dft;
+    float* circular_output_buffer;
+
+    int output_buffer_size;
+    int output_read;
+    int output_write;
 
     int num_samples_read;
-    int num_samples_written;
 
     int data_size; // num samples for all DFTs, sample arrays, and buffers
     int block_size; 
+    int hop_size;
 
     bool loaded;
 
@@ -46,11 +51,14 @@ void converb_free(t_converb* x);
 void converb_load(t_converb* x, t_symbol* s);
 void converb_dsp(t_converb* x, t_signal** sp);
 t_int* converb_perform(t_int* w);
-void converb_convolve(t_converb* x);
 
 // Helper Functions
+void converb_write_to_output_buffer(t_converb* x, float* window);
+void converb_read_from_output_buffer(t_converb* x, float* buf, int n);
+float* convolve_with(float* data, fftwf_complex* ir_dft, int n);
 float* generate_hann_window(int n);
 void normalize(float* x, int size);
+void window(float* data, int n);
 
 static float* hann_window = NULL;
 
@@ -81,15 +89,18 @@ void* converb_new(t_symbol* s, short argc, t_atom* argv) {
 
     // Setting all fields to their default values
     x->input_buffer = NULL;
-    x->convolution = NULL;
-    x->input_dft = NULL;
+    x->circular_output_buffer = NULL;
     x->ir_dft = NULL;
     
+    x->output_buffer_size = 0;
+    x->output_read = 0;
+    x->output_write = 0;
+
     x->num_samples_read = 0;
-    x->num_samples_written = 0;
 
     x->data_size = 0;
     x->block_size = sys_getblksize(); // default block size is the system's
+    x->hop_size = 0;
 
     x->loaded = false;
 
@@ -100,9 +111,8 @@ void* converb_new(t_symbol* s, short argc, t_atom* argv) {
 
 void converb_free(t_converb* x) {
     if (x->input_buffer) free(x->input_buffer);
-    if (x->convolution) free(x->convolution);
-    if (x->input_dft) fftwf_free(x->input_dft);
-    if (x->ir_dft) fftwf_free(x->input_dft);
+    if (x->circular_output_buffer) free(x->circular_output_buffer);
+    if (x->ir_dft) fftwf_free(x->ir_dft);
 }
 
 void converb_load(t_converb* x, t_symbol* s) {
@@ -132,15 +142,20 @@ void converb_load(t_converb* x, t_symbol* s) {
 
     // Initializing
     x->data_size = ir_size;
+    x->hop_size = ceil((float) (HOP_FAC * ir_size) / (float) x->block_size) * x->block_size;
+    x->output_buffer_size = x->data_size + x->hop_size;
 
+    // Windowing stuff
     if (hann_window) free(hann_window);
     hann_window = generate_hann_window(ir_size);
+    window(ir, ir_size);
 
-    for (int i = 0; i < ir_size; i++)
-        ir[i] *= hann_window[i];
-
+    // Initializing buffers
     if (x->input_buffer) free(x->input_buffer);
     x->input_buffer = calloc(x->data_size, sizeof(float));
+
+    if (x->circular_output_buffer) free(x->circular_output_buffer);
+    x->circular_output_buffer = calloc(x->output_buffer_size, sizeof(float));
 
     if (x->ir_dft) fftwf_free(x->ir_dft);
     x->ir_dft = (fftwf_complex*) fftwf_alloc_complex(x->data_size);
@@ -194,55 +209,81 @@ t_int* converb_perform(t_int* w) {
 
     // CONVOLUTION: If our input buffer is full, convolve it with the IR and reset the counter
     if (x->num_samples_read == x->data_size) {
-        converb_convolve(x);
-        x->num_samples_read = 0;
+        float* convolution = convolve_with(x->input_buffer, x->ir_dft, x->data_size);
+        converb_write_to_output_buffer(x, convolution);
+
+        int amount_overlap = x->data_size - x->hop_size;
+        memcpy(x->input_buffer, &x->input_buffer[x->hop_size], amount_overlap * sizeof(float));
+
+        x->num_samples_read = amount_overlap;
     }
     
-    // WRITE STEP: If we have convolved data to write, copy it to the output; else, set the out to zeros.
-    if (!x->convolution)
-        memset(out, 0.0, n * sizeof(float));
-    else {
-        memcpy(out, &x->convolution[x->num_samples_written], n * sizeof(float));
-        x->num_samples_written = (x->num_samples_written + n) % x->data_size;
-    }
+    // WRITE STEP: We always write to the output
+    converb_read_from_output_buffer(x, out, n);
 
     return w + 5;
 }
 
-void converb_convolve(t_converb* x) {
-    // First, window the input
-    for (int i = 0; i < x->data_size; i++)
-        x->input_buffer[i] *= hann_window[i];
+void converb_write_to_output_buffer(t_converb* x, float* window) {
+    for (int i = 0; i < x->data_size; i++) {
+        if (i < x->data_size - x->hop_size)
+            x->circular_output_buffer[(x->output_write + i) % x->output_buffer_size] += window[i];
+        else
+            x->circular_output_buffer[(x->output_write + i) % x->output_buffer_size] = window[i];
+    }
+
+    x->output_write = (x->output_write + x->hop_size) % x->output_buffer_size;
+}
+
+void converb_read_from_output_buffer(t_converb* x, float* buf, int n) {
+    for (int i = 0; i < n; i++)
+        buf[i] = x->circular_output_buffer[(x->output_read + i) % x->output_buffer_size];
+
+    x->output_read = (x->output_read + n) % x->output_buffer_size;
+}
+
+float* convolve_with(float* data, fftwf_complex* ir_dft, int n) {
+    float* copy = calloc(n, sizeof(float));
+    memcpy(copy, data, n * sizeof(float));
+    data = copy;
+
+    window(data, n);
 
     // Taking DFT of input; if no input DFT exists yet, make space
-    if (!x->input_dft)
-        x->input_dft = fftwf_alloc_complex(x->data_size);
+    fftwf_complex* data_dft = fftwf_alloc_complex(n);
     
     // TODO: Potential optimization of saving this plan in the converb~ object
-    fftwf_plan p1 = fftwf_plan_dft_r2c_1d(x->data_size, x->input_buffer, x->input_dft, FFTW_ESTIMATE);
+    fftwf_plan p1 = fftwf_plan_dft_r2c_1d(n, data, data_dft, FFTW_ESTIMATE);
     fftwf_execute(p1);
     fftwf_destroy_plan(p1);
+
+    free(copy);
 
     // Point-wise multiplication of IR and input DFTs
     // Note that the input DFT stores the results of this multiplication
     // A potential optimization could be the use of SIMD intrinsics to shave off some factors of n, but I have no clue how to do that!
-    for (int i = 1; i < x->data_size / 2 + 1; i++)
-        x->input_dft[i] *= x->ir_dft[i];
+    for (int i = 1; i < n / 2 + 1; i++)
+        data_dft[i] *= ir_dft[i];
         
     // Taking inverse DFT of the convolution; if no convolution has been done yet, make space
-    if (!x->convolution)
-        x->convolution = calloc(x->data_size, sizeof(float));
+    float* result = calloc(n, sizeof(float));
 
     // Inverse DFT
     // TODO: Potential optimization of saving this plan in the converb~ object
-    fftwf_plan p2 = fftwf_plan_dft_c2r_1d(x->data_size, x->input_dft, x->convolution, FFTW_ESTIMATE);
+    fftwf_plan p2 = fftwf_plan_dft_c2r_1d(n, data_dft, result, FFTW_ESTIMATE);
     fftwf_execute(p2);
     fftwf_destroy_plan(p2);
 
-    for (int i = 0; i < x->data_size; i++)
-        x->convolution[i] *= hann_window[i];
+    window(result, n);
 
-    normalize(x->convolution, x->data_size);
+    return result;
+
+    // normalize(x->convolution, x->data_size);
+}
+
+void window(float* data, int n) {
+    for (int i = 0; i < n; i++)
+        data[i] *= hann_window[i];
 }
 
 // Generates a Hann window for windowing our samples.
